@@ -8,7 +8,6 @@ from typer.testing import CliRunner
 from nanobot.cli.commands import app
 from nanobot.config.schema import Config
 from nanobot.providers.claude_code_provider import (
-    _get_claude_token,
     _strip_claude_code_prefix,
 )
 from nanobot.providers.litellm_provider import LiteLLMProvider
@@ -159,10 +158,19 @@ def test_strip_claude_code_prefix():
 
 
 @pytest.mark.asyncio
-async def test_get_claude_token_raises_on_missing_cli(monkeypatch):
-    monkeypatch.setattr("nanobot.providers.claude_code_provider.shutil.which", lambda _cmd: None)
-    with pytest.raises(RuntimeError, match="Claude Code CLI.*not found"):
-        await _get_claude_token()
+async def test_get_claude_token_raises_when_all_sources_fail(monkeypatch):
+    from nanobot.providers import claude_code_provider as mod
+
+    async def _none():
+        return None
+
+    monkeypatch.setattr(mod, "_cached_credentials", None)
+    monkeypatch.setattr(mod, "_read_keychain", _none)
+    monkeypatch.setattr(mod, "_read_credentials_file", _none)
+    monkeypatch.setattr(mod, "_read_cli_token", _none)
+
+    with pytest.raises(RuntimeError, match="No Claude credentials found"):
+        await mod._get_claude_token()
 
 
 def test_bare_claude_model_still_matches_anthropic_not_claude_code():

@@ -979,34 +979,28 @@ def _login_github_copilot() -> None:
 @_register_login("claude_code")
 def _login_claude_code() -> None:
     import asyncio
-    import shutil
+    import time
+    from nanobot.providers.claude_code_provider import _read_credentials
 
-    claude_bin = shutil.which("claude")
-    if not claude_bin:
-        console.print(
-            "[red]Claude Code CLI (claude) not found in PATH.[/red]\n"
-            "Install: https://docs.anthropic.com/en/docs/claude-code"
-        )
-        raise typer.Exit(1)
-
-    console.print("[cyan]Checking Claude Code CLI authentication...[/cyan]\n")
-
-    async def _check():
-        proc = await asyncio.create_subprocess_exec(
-            claude_bin, "auth", "token",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        stdout, stderr = await proc.communicate()
-        if proc.returncode != 0 or not stdout.decode().strip():
-            console.print("[yellow]Not authenticated. Run:[/yellow]  claude auth login")
-            raise typer.Exit(1)
-        return stdout.decode().strip()
+    console.print("[cyan]Checking Claude Code credentials...[/cyan]\n")
 
     try:
-        token = asyncio.run(_check())
-        masked = token[:4] + "..." + token[-4:] if len(token) > 12 else "****"
-        console.print(f"[green]✓ Authenticated with Claude Code[/green]  [dim]token: {masked}[/dim]")
+        creds = asyncio.run(_read_credentials())
+        if creds:
+            masked = creds.access_token[:8] + "..." + creds.access_token[-4:] if len(creds.access_token) > 16 else "****"
+            console.print(f"[green]✓ Authenticated with Claude Code[/green]  [dim]source: {creds.source}, token: {masked}[/dim]")
+            if creds.expires_at:
+                remaining_h = (creds.expires_at - time.time() * 1000) / 3600_000
+                if remaining_h > 0:
+                    console.print(f"  [dim]Token expires in {remaining_h:.1f} hours[/dim]")
+                else:
+                    if creds.refresh_token:
+                        console.print("  [yellow]Token expired but refresh token available (will auto-refresh)[/yellow]")
+                    else:
+                        console.print("  [red]Token expired. Run: claude auth login[/red]")
+        else:
+            console.print("[yellow]No credentials found. Run:[/yellow]  claude auth login")
+            raise typer.Exit(1)
     except Exception as e:
         if isinstance(e, SystemExit):
             raise
