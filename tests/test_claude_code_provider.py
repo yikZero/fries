@@ -1,6 +1,7 @@
 import json
 import time
 import pytest
+import httpx
 
 
 async def _async_return(val):
@@ -147,3 +148,91 @@ async def test_read_credentials_fallback_to_cli(monkeypatch):
     creds = await _read_credentials()
     assert creds is not None
     assert creds.source == "cli"
+
+
+# Task 5 tests
+@pytest.mark.asyncio
+async def test_refresh_token_success(monkeypatch):
+    from nanobot.providers.claude_code_provider import _refresh_token, ClaudeCredentials
+
+    creds = ClaudeCredentials(access_token="old", refresh_token="old-ref", expires_at=0, source="file")
+
+    async def mock_post(self, url, **kwargs):
+        return httpx.Response(200, json={
+            "access_token": "new-access", "refresh_token": "new-refresh", "expires_in": 86400,
+        }, request=httpx.Request("POST", url))
+
+    monkeypatch.setattr(httpx.AsyncClient, "post", mock_post)
+    monkeypatch.setattr("nanobot.providers.claude_code_provider._write_back_credentials", lambda creds: _async_return(None))
+
+    new_creds = await _refresh_token(creds)
+    assert new_creds is not None
+    assert new_creds.access_token == "new-access"
+    assert new_creds.refresh_token == "new-refresh"
+    assert new_creds.expires_at > 0
+
+
+@pytest.mark.asyncio
+async def test_refresh_token_returns_none_without_refresh_token():
+    from nanobot.providers.claude_code_provider import _refresh_token, ClaudeCredentials
+    creds = ClaudeCredentials(access_token="tok", source="cli")
+    result = await _refresh_token(creds)
+    assert result is None
+
+
+# Task 6 tests
+@pytest.mark.asyncio
+async def test_get_claude_token_caches(monkeypatch):
+    from nanobot.providers import claude_code_provider as mod
+
+    call_count = 0
+    creds = mod.ClaudeCredentials(
+        access_token="cached-tok", refresh_token="ref",
+        expires_at=int(time.time() * 1000) + 3600_000, source="keychain",
+    )
+
+    async def mock_read():
+        nonlocal call_count
+        call_count += 1
+        return creds
+
+    monkeypatch.setattr(mod, "_read_credentials", mock_read)
+    monkeypatch.setattr(mod, "_cached_credentials", None)
+
+    result1 = await mod._get_claude_token()
+    result2 = await mod._get_claude_token()
+    assert result1.access_token == "cached-tok"
+    assert result2.access_token == "cached-tok"
+    assert call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_get_claude_token_refreshes_expired(monkeypatch):
+    from nanobot.providers import claude_code_provider as mod
+
+    expired = mod.ClaudeCredentials(access_token="old", refresh_token="ref", expires_at=int(time.time() * 1000) - 1000, source="file")
+    refreshed = mod.ClaudeCredentials(access_token="new", refresh_token="ref2", expires_at=int(time.time() * 1000) + 3600_000, source="file")
+
+    monkeypatch.setattr(mod, "_cached_credentials", expired)
+    monkeypatch.setattr(mod, "_refresh_token", lambda c: _async_return(refreshed))
+
+    result = await mod._get_claude_token()
+    assert result.access_token == "new"
+
+
+@pytest.mark.asyncio
+async def test_get_claude_token_raises_when_no_credentials(monkeypatch):
+    from nanobot.providers import claude_code_provider as mod
+    monkeypatch.setattr(mod, "_cached_credentials", None)
+    monkeypatch.setattr(mod, "_read_credentials", lambda: _async_return(None))
+
+    with pytest.raises(RuntimeError, match="No Claude credentials found"):
+        await mod._get_claude_token()
+
+
+# Task 7 test
+def test_provider_sets_oauth_beta_header():
+    from nanobot.providers.claude_code_provider import ClaudeCodeProvider
+    provider = ClaudeCodeProvider()
+    assert "anthropic-beta" in provider.extra_headers
+    assert "oauth-2025-04-20" in provider.extra_headers["anthropic-beta"]

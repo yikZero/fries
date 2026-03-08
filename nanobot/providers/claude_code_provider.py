@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import httpx
 from loguru import logger
 
 from nanobot.providers.litellm_provider import LiteLLMProvider
@@ -21,6 +22,17 @@ from nanobot.providers.base import LLMResponse
 # ---------------------------------------------------------------------------
 
 _EXPIRY_BUFFER_MS = 5 * 60 * 1000  # 5 minutes in milliseconds
+
+_TOKEN_URL = "https://console.anthropic.com/v1/oauth/token"
+_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
+_REFRESH_HEADERS = {
+    "User-Agent": "claude-cli/2.1.2",
+    "Referer": "https://claude.ai/",
+    "Origin": "https://claude.ai",
+    "Content-Type": "application/json",
+}
+
+_OAUTH_BETA = "oauth-2025-04-20"
 
 
 @dataclass
@@ -178,6 +190,156 @@ async def _read_credentials() -> ClaudeCredentials | None:
 
 
 # ---------------------------------------------------------------------------
+# Token refresh & write-back
+# ---------------------------------------------------------------------------
+
+
+async def _refresh_token(creds: ClaudeCredentials) -> ClaudeCredentials | None:
+    """Refresh an expired OAuth token. Returns new credentials or None on failure."""
+    if not creds.refresh_token:
+        return None
+
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(
+                _TOKEN_URL,
+                headers=_REFRESH_HEADERS,
+                json={
+                    "grant_type": "refresh_token",
+                    "refresh_token": creds.refresh_token,
+                    "client_id": _CLIENT_ID,
+                },
+            )
+            resp.raise_for_status()
+            data = resp.json()
+
+        expires_at = int(time.time() * 1000) + data["expires_in"] * 1000
+        new_creds = ClaudeCredentials(
+            access_token=data["access_token"],
+            refresh_token=data.get("refresh_token", creds.refresh_token),
+            expires_at=expires_at,
+            source=creds.source,
+        )
+        await _write_back_credentials(new_creds)
+        return new_creds
+    except Exception as exc:
+        logger.warning("OAuth token refresh failed: {}", exc)
+        return None
+
+
+async def _write_back_credentials(creds: ClaudeCredentials) -> None:
+    """Persist refreshed credentials back to their original source."""
+    oauth_data = {
+        "accessToken": creds.access_token,
+        "refreshToken": creds.refresh_token,
+        "expiresAt": creds.expires_at,
+    }
+
+    if creds.source == "keychain" and sys.platform == "darwin":
+        await _write_keychain(oauth_data)
+    elif creds.source == "file":
+        _write_credentials_file(oauth_data)
+
+
+async def _write_keychain(oauth_data: dict) -> None:
+    """Write updated OAuth data back to the macOS Keychain."""
+    try:
+        # Read existing keychain data to preserve other fields
+        proc = await asyncio.create_subprocess_exec(
+            "security", "find-generic-password",
+            "-s", _KEYCHAIN_SERVICE, "-w",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, _ = await proc.communicate()
+
+        if proc.returncode == 0:
+            data = json.loads(stdout.decode().strip())
+        else:
+            data = {}
+
+        data["claudeAiOauth"] = oauth_data
+        payload = json.dumps(data)
+
+        proc = await asyncio.create_subprocess_exec(
+            "security", "add-generic-password",
+            "-U", "-s", _KEYCHAIN_SERVICE,
+            "-w", payload, "-a", "claude-code",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        await proc.communicate()
+    except Exception as exc:
+        logger.debug("Keychain write-back failed: {}", exc)
+
+
+def _write_credentials_file(oauth_data: dict) -> None:
+    """Write updated OAuth data back to the credentials file."""
+    try:
+        path = _get_credentials_file_path()
+        raw = path.read_text(encoding="utf-8")
+        data = json.loads(raw)
+
+        # Detect wrapper format
+        if "data" in data and "claudeAiOauth" in data["data"]:
+            data["data"]["claudeAiOauth"] = oauth_data
+        else:
+            data["claudeAiOauth"] = oauth_data
+
+        path.write_text(json.dumps(data), encoding="utf-8")
+    except Exception as exc:
+        logger.debug("Credentials file write-back failed: {}", exc)
+
+
+# ---------------------------------------------------------------------------
+# Cached credential access (full flow)
+# ---------------------------------------------------------------------------
+
+_cached_credentials: ClaudeCredentials | None = None
+
+
+async def _get_claude_token() -> ClaudeCredentials:
+    """Return valid credentials, using cache / refresh / fresh-read as needed."""
+    global _cached_credentials
+
+    # 1. Cache hit
+    if _cached_credentials and not _is_expired(_cached_credentials):
+        return _cached_credentials
+
+    # 2. Cache expired → try refresh
+    if _cached_credentials and _is_expired(_cached_credentials):
+        if _cached_credentials.refresh_token:
+            refreshed = await _refresh_token(_cached_credentials)
+            if refreshed:
+                _cached_credentials = refreshed
+                return _cached_credentials
+        _cached_credentials = None
+
+    # 3. Read fresh
+    creds = await _read_credentials()
+    if not creds:
+        raise RuntimeError(
+            "No Claude credentials found. "
+            "Install Claude Code CLI and run: claude auth login"
+        )
+
+    # 4. Freshly read but expired → try refresh
+    if _is_expired(creds) and creds.refresh_token:
+        refreshed = await _refresh_token(creds)
+        if refreshed:
+            creds = refreshed
+
+    _cached_credentials = creds
+    return _cached_credentials
+
+
+def _clear_cached_credentials() -> None:
+    """Reset the cached credentials (useful for testing)."""
+    global _cached_credentials
+    _cached_credentials = None
+
+
+# ---------------------------------------------------------------------------
 # Provider
 # ---------------------------------------------------------------------------
 
@@ -204,6 +366,7 @@ class ClaudeCodeProvider(LiteLLMProvider):
             provider_name="anthropic",
         )
         self._original_model = default_model
+        self.extra_headers["anthropic-beta"] = _OAUTH_BETA
 
     async def chat(
         self,
@@ -215,20 +378,14 @@ class ClaudeCodeProvider(LiteLLMProvider):
         reasoning_effort: str | None = None,
     ) -> LLMResponse:
         try:
-            token = await _read_cli_token()
-            if token is None:
-                raise RuntimeError(
-                    "Claude Code CLI (claude) not found or auth failed. "
-                    "Run 'claude auth login' to authenticate first."
-                )
-            token_str = token.access_token
+            creds = await _get_claude_token()
         except RuntimeError as e:
             logger.error("Claude Code token fetch failed: {}", e)
             return LLMResponse(content=str(e), finish_reason="error")
 
         # Note: mutating self.api_key is not concurrency-safe, but nanobot
         # uses a single provider instance per session so this is acceptable.
-        self.api_key = token_str
+        self.api_key = creds.access_token
 
         resolved_model = _strip_claude_code_prefix(model) if model else None
 
