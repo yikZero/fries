@@ -7,6 +7,11 @@ from typer.testing import CliRunner
 
 from nanobot.cli.commands import app
 from nanobot.config.schema import Config
+from nanobot.providers.claude_code_provider import (
+    _get_claude_token,
+    _strip_claude_code_prefix,
+    ClaudeCodeProvider,
+)
 from nanobot.providers.litellm_provider import LiteLLMProvider
 from nanobot.providers.openai_codex_provider import _strip_model_prefix
 from nanobot.providers.registry import find_by_model
@@ -146,6 +151,19 @@ def test_find_by_model_matches_claude_code_prefix():
 
     assert spec is not None
     assert spec.name == "claude_code"
+
+
+def test_strip_claude_code_prefix():
+    assert _strip_claude_code_prefix("claude-code/claude-sonnet-4-6") == "claude-sonnet-4-6"
+    assert _strip_claude_code_prefix("claude_code/claude-opus-4-5") == "claude-opus-4-5"
+    assert _strip_claude_code_prefix("claude-sonnet-4-6") == "claude-sonnet-4-6"
+
+
+@pytest.mark.asyncio
+async def test_get_claude_token_raises_on_missing_cli(monkeypatch):
+    monkeypatch.setattr("nanobot.providers.claude_code_provider.shutil.which", lambda _cmd: None)
+    with pytest.raises(RuntimeError, match="Claude Code CLI.*not found"):
+        await _get_claude_token()
 
 
 @pytest.fixture
