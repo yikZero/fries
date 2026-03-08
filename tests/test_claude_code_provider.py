@@ -4,6 +4,15 @@ import pytest
 import httpx
 
 
+@pytest.fixture(autouse=True)
+def _reset_credential_cache():
+    """Ensure each test starts with a clean credential cache."""
+    from nanobot.providers.claude_code_provider import _clear_cached_credentials
+    _clear_cached_credentials()
+    yield
+    _clear_cached_credentials()
+
+
 async def _async_return(val):
     return val
 

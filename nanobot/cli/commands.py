@@ -1001,9 +1001,9 @@ def _login_claude_code() -> None:
         else:
             console.print("[yellow]No credentials found. Run:[/yellow]  claude auth login")
             raise typer.Exit(1)
+    except typer.Exit:
+        raise
     except Exception as e:
-        if isinstance(e, SystemExit):
-            raise
         console.print(f"[red]Authentication error: {e}[/red]")
         raise typer.Exit(1)
 

@@ -24,13 +24,17 @@ from nanobot.providers.base import LLMResponse
 _EXPIRY_BUFFER_MS = 5 * 60 * 1000  # 5 minutes in milliseconds
 
 _TOKEN_URL = "https://console.anthropic.com/v1/oauth/token"
+# Shared OAuth client ID used by Claude CLI — update if Anthropic rotates it.
 _CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 _REFRESH_HEADERS = {
+    # Keep User-Agent in sync with installed Claude CLI version.
     "User-Agent": "claude-cli/2.1.2",
     "Referer": "https://claude.ai/",
     "Origin": "https://claude.ai",
     "Content-Type": "application/json",
 }
+
+_SUBPROCESS_TIMEOUT = 10  # seconds — bound keychain / CLI subprocess waits
 
 _OAUTH_BETA = "oauth-2025-04-20"
 
@@ -72,7 +76,9 @@ async def _read_keychain() -> ClaudeCredentials | None:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        stdout, stderr = await proc.communicate()
+        stdout, stderr = await asyncio.wait_for(
+            proc.communicate(), timeout=_SUBPROCESS_TIMEOUT,
+        )
 
         if proc.returncode != 0:
             logger.debug("Keychain lookup failed (exit {})", proc.returncode)
@@ -149,7 +155,9 @@ async def _read_cli_token() -> ClaudeCredentials | None:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        stdout, stderr = await proc.communicate()
+        stdout, stderr = await asyncio.wait_for(
+            proc.communicate(), timeout=_SUBPROCESS_TIMEOUT,
+        )
 
         if proc.returncode != 0:
             err = stderr.decode().strip() or stdout.decode().strip()
@@ -200,7 +208,7 @@ async def _refresh_token(creds: ClaudeCredentials) -> ClaudeCredentials | None:
         return None
 
     try:
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(timeout=15.0) as client:
             resp = await client.post(
                 _TOKEN_URL,
                 headers=_REFRESH_HEADERS,
@@ -251,14 +259,18 @@ async def _write_keychain(oauth_data: dict) -> None:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        stdout, _ = await proc.communicate()
+        stdout, _ = await asyncio.wait_for(
+            proc.communicate(), timeout=_SUBPROCESS_TIMEOUT,
+        )
 
         if proc.returncode == 0:
             data = json.loads(stdout.decode().strip())
         else:
             data = {}
 
-        data["claudeAiOauth"] = oauth_data
+        existing_oauth = data.get("claudeAiOauth", {})
+        existing_oauth.update(oauth_data)
+        data["claudeAiOauth"] = existing_oauth
         payload = json.dumps(data)
 
         proc = await asyncio.create_subprocess_exec(
@@ -268,7 +280,9 @@ async def _write_keychain(oauth_data: dict) -> None:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        await proc.communicate()
+        await asyncio.wait_for(
+            proc.communicate(), timeout=_SUBPROCESS_TIMEOUT,
+        )
     except Exception as exc:
         logger.debug("Keychain write-back failed: {}", exc)
 
@@ -280,15 +294,18 @@ def _write_credentials_file(oauth_data: dict) -> None:
         raw = path.read_text(encoding="utf-8")
         data = json.loads(raw)
 
-        # Detect wrapper format
+        # Detect wrapper format and merge to preserve fields like scopes
         if "data" in data and "claudeAiOauth" in data["data"]:
-            data["data"]["claudeAiOauth"] = oauth_data
+            data["data"]["claudeAiOauth"].update(oauth_data)
         else:
-            data["claudeAiOauth"] = oauth_data
+            existing_oauth = data.get("claudeAiOauth", {})
+            existing_oauth.update(oauth_data)
+            data["claudeAiOauth"] = existing_oauth
 
         path.write_text(json.dumps(data), encoding="utf-8")
+        path.chmod(0o600)
     except Exception as exc:
-        logger.debug("Credentials file write-back failed: {}", exc)
+        logger.warning("Credentials file write-back failed: {}", exc)
 
 
 # ---------------------------------------------------------------------------
@@ -389,7 +406,7 @@ class ClaudeCodeProvider(LiteLLMProvider):
 
         resolved_model = _strip_claude_code_prefix(model) if model else None
 
-        return await super().chat(
+        result = await super().chat(
             messages=messages,
             tools=tools,
             model=resolved_model,
@@ -397,6 +414,12 @@ class ClaudeCodeProvider(LiteLLMProvider):
             temperature=temperature,
             reasoning_effort=reasoning_effort,
         )
+
+        # API 401 → clear cache so next request re-reads credentials
+        if result.finish_reason == "error" and "401" in (result.content or ""):
+            _clear_cached_credentials()
+
+        return result
 
     def get_default_model(self) -> str:
         return self._original_model
