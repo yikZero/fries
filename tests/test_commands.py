@@ -165,6 +165,14 @@ async def test_get_claude_token_raises_on_missing_cli(monkeypatch):
         await _get_claude_token()
 
 
+def test_bare_claude_model_still_matches_anthropic_not_claude_code():
+    """Bare claude-* models (without claude-code/ prefix) must match anthropic provider."""
+    spec = find_by_model("claude-sonnet-4-6")
+
+    assert spec is not None
+    assert spec.name == "anthropic"
+
+
 @pytest.fixture
 def mock_agent_runtime(tmp_path):
     """Mock agent command dependencies for focused CLI tests."""
