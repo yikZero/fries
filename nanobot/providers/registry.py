@@ -216,6 +216,25 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
         model_overrides=(),
         is_oauth=True,  # OAuth-based authentication
     ),
+    # Claude Code: uses Claude CLI OAuth token, not API key.
+    ProviderSpec(
+        name="claude_code",
+        keywords=("claude-code",),
+        env_key="",  # OAuth-based, no API key
+        display_name="Claude Code",
+        litellm_prefix="",  # LiteLLM recognizes "claude-*" natively
+        skip_prefixes=(),
+        env_extras=(),
+        is_gateway=False,
+        is_local=False,
+        detect_by_key_prefix="",
+        detect_by_base_keyword="",
+        default_api_base="",
+        strip_model_prefix=False,
+        model_overrides=(),
+        is_oauth=True,
+        supports_prompt_caching=True,
+    ),
     # Github Copilot: uses OAuth, not API key.
     ProviderSpec(
         name="github_copilot",

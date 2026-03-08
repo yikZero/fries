@@ -134,6 +134,20 @@ def test_openai_codex_strip_prefix_supports_hyphen_and_underscore():
     assert _strip_model_prefix("openai_codex/gpt-5.1-codex") == "gpt-5.1-codex"
 
 
+def test_config_matches_claude_code_with_hyphen_prefix():
+    config = Config()
+    config.agents.defaults.model = "claude-code/claude-sonnet-4-6"
+
+    assert config.get_provider_name() == "claude_code"
+
+
+def test_find_by_model_matches_claude_code_prefix():
+    spec = find_by_model("claude-code/claude-sonnet-4-6")
+
+    assert spec is not None
+    assert spec.name == "claude_code"
+
+
 @pytest.fixture
 def mock_agent_runtime(tmp_path):
     """Mock agent command dependencies for focused CLI tests."""
