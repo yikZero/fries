@@ -10,7 +10,6 @@ from nanobot.config.schema import Config
 from nanobot.providers.claude_code_provider import (
     _get_claude_token,
     _strip_claude_code_prefix,
-    ClaudeCodeProvider,
 )
 from nanobot.providers.litellm_provider import LiteLLMProvider
 from nanobot.providers.openai_codex_provider import _strip_model_prefix

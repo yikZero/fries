@@ -82,6 +82,8 @@ class ClaudeCodeProvider(LiteLLMProvider):
             logger.error("Claude Code token fetch failed: {}", e)
             return LLMResponse(content=str(e), finish_reason="error")
 
+        # Note: mutating self.api_key is not concurrency-safe, but nanobot
+        # uses a single provider instance per session so this is acceptable.
         self.api_key = token
 
         resolved_model = _strip_claude_code_prefix(model) if model else None
