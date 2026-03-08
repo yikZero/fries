@@ -224,6 +224,11 @@ def _make_provider(config: Config):
     if provider_name == "openai_codex" or model.startswith("openai-codex/"):
         return OpenAICodexProvider(default_model=model)
 
+    # Claude Code (OAuth via CLI)
+    if provider_name == "claude_code" or model.startswith("claude-code/"):
+        from nanobot.providers.claude_code_provider import ClaudeCodeProvider
+        return ClaudeCodeProvider(default_model=model)
+
     # Custom: direct OpenAI-compatible endpoint, bypasses LiteLLM
     from nanobot.providers.custom_provider import CustomProvider
     if provider_name == "custom":
@@ -967,6 +972,44 @@ def _login_github_copilot() -> None:
         asyncio.run(_trigger())
         console.print("[green]✓ Authenticated with GitHub Copilot[/green]")
     except Exception as e:
+        console.print(f"[red]Authentication error: {e}[/red]")
+        raise typer.Exit(1)
+
+
+@_register_login("claude_code")
+def _login_claude_code() -> None:
+    import asyncio
+    import shutil
+
+    claude_bin = shutil.which("claude")
+    if not claude_bin:
+        console.print(
+            "[red]Claude Code CLI (claude) not found in PATH.[/red]\n"
+            "Install: https://docs.anthropic.com/en/docs/claude-code"
+        )
+        raise typer.Exit(1)
+
+    console.print("[cyan]Checking Claude Code CLI authentication...[/cyan]\n")
+
+    async def _check():
+        proc = await asyncio.create_subprocess_exec(
+            claude_bin, "auth", "token",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await proc.communicate()
+        if proc.returncode != 0 or not stdout.decode().strip():
+            console.print("[yellow]Not authenticated. Run:[/yellow]  claude auth login")
+            raise typer.Exit(1)
+        return stdout.decode().strip()
+
+    try:
+        token = asyncio.run(_check())
+        masked = token[:4] + "..." + token[-4:] if len(token) > 12 else "****"
+        console.print(f"[green]✓ Authenticated with Claude Code[/green]  [dim]token: {masked}[/dim]")
+    except Exception as e:
+        if isinstance(e, SystemExit):
+            raise
         console.print(f"[red]Authentication error: {e}[/red]")
         raise typer.Exit(1)
 

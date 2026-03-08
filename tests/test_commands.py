@@ -359,6 +359,17 @@ def test_gateway_workspace_option_overrides_config(monkeypatch, tmp_path: Path) 
     assert config.workspace_path == override
 
 
+def test_make_provider_returns_claude_code_provider(monkeypatch):
+    from nanobot.cli.commands import _make_provider
+
+    config = Config()
+    config.agents.defaults.model = "claude-code/claude-sonnet-4-6"
+
+    provider = _make_provider(config)
+
+    assert type(provider).__name__ == "ClaudeCodeProvider"
+
+
 def test_gateway_uses_config_directory_for_cron_store(monkeypatch, tmp_path: Path) -> None:
     config_file = tmp_path / "instance" / "config.json"
     config_file.parent.mkdir(parents=True)
